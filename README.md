@@ -13,9 +13,9 @@
 
 ### Database
 - [x] [인덱스](database/index.md)
+- [x] [페이지네이션](database/pagination.md)
 - [ ] 트랜잭션과 격리 수준
 - [ ] 락 (비관적 락, 낙관적 락)
-- [ ] 페이지네이션 (오프셋, 커서)
 - [ ] 정규화
 
 ### Network
