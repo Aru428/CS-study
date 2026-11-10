@@ -46,6 +46,9 @@
 - [ ] 동적 계획법 (DP)
 - [ ] 그리디
 
+### Backend
+- [ ] 캐시와 Redis
+
 ## 파일 이름 규칙
 
 `폴더/주제.md` (예: `database/index.md`, `network/http.md`)
