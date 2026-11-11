@@ -32,7 +32,7 @@
 ### Data Structure
 - [ ] 배열과 연결 리스트
 - [ ] 스택과 큐
-- [ ] 해시 테이블
+- [x] [해시 테이블](data-structure/hash-table.md)
 - [ ] 힙과 우선순위 큐
 - [ ] 트리와 B-Tree (인덱스와 연결)
 - [ ] 그래프
