@@ -1,6 +1,6 @@
 # 트랜잭션과 격리 수준
 
-> 날짜: 2026-11-13 (격리 수준 4가지는 다음에 이어서)
+> 날짜: 2026-11-13 ~ 2026-11-14
 
 ## 무엇인가
 
@@ -118,9 +118,68 @@ UPDATE를 보내면 DB는 그 행을 **바로 바꾼다.** 커밋은 값을 쓰�
 
 **반복 불가능한 읽기, 팬텀 리드가 문제인 이유**: 트랜잭션 하나는 한 시점의 일관된 데이터를 기준으로 일하길 기대한다. 두 번 읽은 게 서로 다른 트랜잭션이라면 새 값이 보이는 건 정상이다.
 
-### 다음에 볼 것: 격리 수준 4가지
+### 격리 수준 4가지
 
-READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ(MySQL 기본), SERIALIZABLE. 각각 위 문제 중 어디까지 막는지, MySQL REPEATABLE READ가 MVCC로 팬텀 리드를 어떻게 대부분 막는지.
+아래로 갈수록 엄격하다. 엄격할수록 서로 기다리는 일이 늘어 느려진다.
+
+| 격리 수준 | 뜻 | 더티 리드 | 반복 불가능한 읽기 | 팬텀 리드 |
+|---|---|---|---|---|
+| READ UNCOMMITTED | 커밋 안 된 것도 읽음 | 생김 | 생김 | 생김 |
+| READ COMMITTED | 커밋된 것만 읽음 | 막음 | 생김 | 생김 |
+| REPEATABLE READ | 같은 걸 다시 읽어도 같게 | 막음 | 막음 | 생김 (SQL 표준 기준. MySQL은 일반 SELECT에서 막음) |
+| SERIALIZABLE | 줄 세운 것처럼 | 막음 | 막음 | 막음 |
+
+이름이 보장하는 것을 말한다. 기본값은 MySQL이 REPEATABLE READ, PostgreSQL·Oracle이 READ COMMITTED.
+
+### 격리 수준을 바꾸는 곳
+
+실제로 적용하는 건 MySQL이고, Spring은 명령을 보내 주는 쪽이다. 좁은 범위가 이긴다.
+
+| 어디서 | 방법 | 범위 |
+|---|---|---|
+| MySQL 서버 | `my.cnf` 또는 `SET GLOBAL transaction_isolation = ...` | 모든 연결의 기본값 |
+| MySQL 세션 | `SET SESSION TRANSACTION ISOLATION LEVEL ...` | 연결 하나 |
+| MySQL 다음 트랜잭션 | `SET TRANSACTION ISOLATION LEVEL ...` | 다음 트랜잭션 하나 |
+| Spring | `@Transactional(isolation = Isolation.READ_COMMITTED)` | 그 메서드의 트랜잭션. 끝나면 연결의 원래 값으로 되돌림 |
+
+아무것도 안 쓰면 `Isolation.DEFAULT` → DB 기본값. 현재 값 확인은 `SELECT @@transaction_isolation;`
+
+### MVCC: REPEATABLE READ는 어떻게 막나
+
+한 행의 여러 버전을 남겨 두고(언두 로그), 트랜잭션마다 자기가 봐야 할 버전을 골라 보여 준다. 기준은 **스냅샷(이 시점까지 커밋된 것만 보인다)**이고, 찍는 시점이 다르다.
+
+| 격리 수준 | 스냅샷 찍는 시점 |
+|---|---|
+| READ COMMITTED | SELECT 할 때마다 새로 |
+| REPEATABLE READ | 트랜잭션에서 처음 SELECT 할 때 한 번, 끝까지 유지 |
+
+```
+B: 행사 1 조회               ← 첫 읽기 (REPEATABLE READ면 여기서 스냅샷)
+A: 행사 1을 "11/22"로 수정 후 커밋
+B: 행사 1 다시 조회
+   READ COMMITTED  → 새 스냅샷 → "11/22" (반복 불가능한 읽기)
+   REPEATABLE READ → 처음 스냅샷 → 언두 로그에서 옛 버전 → "11/20"
+```
+
+- 반복 불가능한 읽기를 막는 건 **스냅샷 유지 + 언두 로그의 옛 버전** 두 가지가 같이 있어서다.
+- 새로 추가된 행도 스냅샷 이후 커밋이라 안 보인다 → 일반 SELECT의 팬텀 리드도 막는다.
+- 테이블을 복사하는 게 아니라 "이 시점 기준"만 기억하고, 필요할 때 언두 로그에서 찾아 읽는다.
+- 스냅샷은 `START TRANSACTION` 순간이 아니라 첫 SELECT 때 찍힌다.
+- **한계**: `UPDATE`, `SELECT ... FOR UPDATE`처럼 바꾸려고 읽을 때는 스냅샷이 아니라 최신 값을 본다. 그래서 "읽기 → +1 → 저장" 같은 갱신 손실은 따로 막아야 한다 → 락 주제.
+- 내 트랜잭션이 바꾼 것은 내 트랜잭션에서 보인다. 스냅샷은 다른 트랜잭션의 변경을 가리는 것이다.
+
+### 덕모임에 대입
+
+| 상황 (REPEATABLE READ) | 결과 |
+|---|---|
+| 적재 도중 사용자가 목록을 봄 | 적재 전 목록. 반만 바뀐 목록은 안 보임 |
+| 적재 커밋 뒤 새로 봄 | 새 목록 |
+| 한 요청 안에서 같은 행사를 두 번 읽는 사이 적재 커밋 | 두 번 다 같은 값 |
+
+- **원자성**: 결과가 반쪽이 안 되게 (끝났을 때 기준)
+- **격리성**: 과정이 남에게 안 보이게 (진행 중 기준)
+
+둘이 합쳐져서 "사용자는 적재 전 아니면 적재 후만 본다"가 된다.
 
 ## 직접 확인한 것
 
@@ -130,6 +189,7 @@ READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ(MySQL 기본), SERIALIZABLE. �
 - 크롤링 항목마다 기존 행사는 `event.syncFrom(...)`으로 필드만 바꾼다(save 호출 없음, 변경 감지). 새 행사는 모아서 `saveAll`.
 - `regionIdOf`: 없는 지역 코드를 기본 구역으로 넣지 않고 `BusinessException`을 던진다. 조용히 넣으면 지도 핀이 엉뚱한 곳에 서고 크롤러 오타를 알 방법이 없어진다는 이유.
 - `BusinessException extends RuntimeException` → 언체크라 롤백된다.
+- 설정 파일과 `@Transactional(isolation = ...)` 어디에도 격리 수준을 바꾼 곳이 없다 → 코드 기준으로는 MySQL 기본값 REPEATABLE READ (DB 서버 설정은 `SELECT @@transaction_isolation;`으로 확인 필요).
 - 순서: `syncFrom`(SQL 안 나감) → `saveAll`(`Event` id가 `IDENTITY`라 INSERT 바로 나감) → `report()`의 `countStale` JPQL 직전 flush로 UPDATE 나감 → 커밋. 그래서 INSERT 이후 ~ 커밋 사이에는 커밋 안 된 변경이 DB에 실제로 있다.
 
 ## 헷갈렸던 점
@@ -146,6 +206,10 @@ READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ(MySQL 기본), SERIALIZABLE. �
 - **JPA는 커밋 직전에 무조건 UPDATE를 보내나?** 바뀐 게 있을 때만, 그리고 커밋 때뿐 아니라 JPQL 실행 직전에도 보낸다.
 - **반복 불가능한 읽기는 격리 수준인가?** 아니다. 문제(현상)다. 격리 수준은 READ UNCOMMITTED 등 4가지.
 - **반복 불가능한 읽기 예시는 하나의 트랜잭션인가?** B의 두 번 읽기가 B 트랜잭션 하나, A는 따로 도는 트랜잭션이다.
+- **MySQL "표준"이 REPEATABLE READ?** "기본값"이다. 표준은 SQL 표준 문서의 4단계 정의를 말한다. 그리고 설정을 안 바꿨을 때만 맞는 말이다.
+- **격리 수준은 Spring에서도, MySQL에서도 바꿀 수 있나?** 둘 다 된다. 적용은 MySQL이 하고 Spring은 명령을 보낸다. 좁은 범위가 이긴다.
+- **READ COMMITTED에서 B가 다시 읽어 "11/22"를 본 건 더티 리드?** 아니다. A가 커밋한 뒤에 읽었으니 반복 불가능한 읽기다. 더티 리드는 커밋 "전"에 읽는 것.
+- **반쪽 목록이 안 보이는 건 원자성 + 일관성?** 원자성 + 격리성이다. ACID: All or nothing / Constraint / Isolation / Disk에 남음.
 - **완벽한 격리가 왜 느린가?** 한 번에 하나씩 줄 세우면 상관없는 데이터를 건드리는 요청까지 앞의 긴 작업을 기다린다.
 
 ## 면접용 정리
@@ -155,6 +219,10 @@ READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ(MySQL 기본), SERIALIZABLE. �
 > `@Transactional`은 메서드 밖으로 나간 예외가 언체크 예외일 때만 기본으로 롤백하고, IOException 같은 체크 예외는 커밋합니다. 체크 예외도 롤백해야 하면 rollbackFor로 지정하거나 언체크 예외로 감싸서 던집니다. 예외를 안에서 잡고 다시 던지지 않으면 정상 종료로 보고 커밋되니 주의해야 합니다.
 
 > 트랜잭션이 동시에 돌면 커밋 전 값을 읽는 더티 리드, 한 트랜잭션 안에서 다른 트랜잭션의 커밋된 수정으로 같은 행의 값이 바뀌는 반복 불가능한 읽기, 추가나 삭제로 같은 조건의 행 수가 바뀌는 팬텀 리드가 생길 수 있습니다. 격리 수준은 이 중 어디까지 막을지 고르는 설정입니다.
+
+> 격리 수준은 READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ, SERIALIZABLE 순으로 엄격해지고, 엄격할수록 서로 기다리는 일이 늘어 느려집니다. MySQL 기본값인 REPEATABLE READ는 트랜잭션에서 처음 조회할 때 스냅샷을 만들고 이후 일반 조회는 그 시점 기준으로 언두 로그의 버전을 읽어서, 더티 리드와 반복 불가능한 읽기를 막고 일반 조회의 팬텀 리드도 막습니다.
+
+> 덕모임은 격리 수준을 따로 바꾸지 않아 MySQL 기본값 REPEATABLE READ로 동작합니다. 행사 적재는 한 트랜잭션이라 원자성으로 결과가 전부 반영되거나 전부 취소되고, 격리성 덕분에 적재 도중 다른 사용자는 커밋 전 변경을 보지 못해 항상 적재 전이나 적재 후 목록만 보게 됩니다.
 
 ## 참고한 자료
 
