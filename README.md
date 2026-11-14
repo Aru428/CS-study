@@ -14,7 +14,7 @@
 ### Database
 - [x] [인덱스](database/index.md)
 - [x] [페이지네이션](database/pagination.md)
-- [ ] 트랜잭션과 격리 수준
+- [x] [트랜잭션과 격리 수준](database/transaction.md)
 - [ ] 락 (비관적 락, 낙관적 락)
 - [ ] 정규화
 
